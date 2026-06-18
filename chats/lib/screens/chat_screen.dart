@@ -112,9 +112,10 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final uid = widget.chatService.currentUserId ?? '';
       final resourceType = mediaType == 'file' ? 'raw' : mediaType;
-      final result = await _mediaService.upload(uid, file, resourceType);
+      final (result, uploadError) =
+          await _mediaService.upload(uid, file, resourceType);
       if (result == null) {
-        _showSnack('上傳失敗，請確認網路連線及 Cloudinary 設定');
+        _showSnack('上傳失敗：${uploadError ?? '未知錯誤'}');
         return;
       }
       await widget.chatService.sendMessage(
@@ -139,8 +140,20 @@ class _ChatScreenState extends State<ChatScreen> {
     await _sendMedia(file, 'image');
   }
 
+  Future<void> _captureImage() async {
+    final file = await _mediaService.captureImage();
+    if (file == null) return;
+    await _sendMedia(file, 'image');
+  }
+
   Future<void> _pickVideo() async {
     final file = await _mediaService.pickVideo();
+    if (file == null) return;
+    await _sendMedia(file, 'video');
+  }
+
+  Future<void> _captureVideo() async {
+    final file = await _mediaService.captureVideo();
     if (file == null) return;
     await _sendMedia(file, 'video');
   }
@@ -169,18 +182,30 @@ class _ChatScreenState extends State<ChatScreen> {
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
+            const SizedBox(height: 4),
             ListTile(
-              leading: const Icon(Icons.image_outlined, color: Colors.orange),
-              title: const Text('傳送圖片'),
-              onTap: () { Navigator.pop(context); _pickImage(); },
+              leading: const Icon(Icons.camera_alt_outlined, color: Colors.orange),
+              title: const Text('拍照'),
+              onTap: () { Navigator.pop(context); _captureImage(); },
             ),
             ListTile(
               leading: const Icon(Icons.videocam_outlined, color: Colors.orange),
-              title: const Text('傳送影片'),
+              title: const Text('錄影'),
+              onTap: () { Navigator.pop(context); _captureVideo(); },
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.image_outlined, color: Colors.grey),
+              title: const Text('從相簿選擇圖片'),
+              onTap: () { Navigator.pop(context); _pickImage(); },
+            ),
+            ListTile(
+              leading: const Icon(Icons.video_library_outlined, color: Colors.grey),
+              title: const Text('從相簿選擇影片'),
               onTap: () { Navigator.pop(context); _pickVideo(); },
             ),
             ListTile(
-              leading: const Icon(Icons.attach_file, color: Colors.orange),
+              leading: const Icon(Icons.attach_file, color: Colors.grey),
               title: const Text('傳送檔案'),
               onTap: () { Navigator.pop(context); _pickFile(); },
             ),

@@ -4,6 +4,7 @@ import '../services/auth_service.dart';
 import '../services/chat_service.dart';
 import 'chat_screen.dart';
 import 'lock_screen.dart';
+import 'settings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   final AuthService authService;
@@ -15,11 +16,9 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   late final ChatService _chatService;
-  final _searchController = TextEditingController();
+  int _tabIndex = 0;
   bool _loading = true;
-  bool _searching = false;
-  ChatUser? _searchResult;
-  bool _searched = false; // whether a search was attempted
+  final List<ChatUser> _recentChats = [];
 
   @override
   void initState() {
@@ -40,79 +39,13 @@ class _HomeScreenState extends State<HomeScreen> {
     await widget.authService.signOut();
   }
 
-  // ── Handle edit ─────────────────────────────────────────────────────────────
-  Future<void> _showEditHandleDialog() async {
-    final controller =
-        TextEditingController(text: _chatService.currentHandle ?? '');
-    String? errorText;
-
-    await showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setD) => AlertDialog(
-          title: const Text('設定用戶 ID'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                '3–20 字元，只能使用英文小寫字母、數字與底線 (_)。',
-                style: TextStyle(fontSize: 12, color: Colors.grey),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: controller,
-                autofocus: true,
-                decoration: InputDecoration(
-                  labelText: '用戶 ID',
-                  prefixText: '@',
-                  border: const OutlineInputBorder(),
-                  errorText: errorText,
-                ),
-                onChanged: (_) => setD(() => errorText = null),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: Colors.orange),
-              onPressed: () async {
-                final err =
-                    await _chatService.updateHandle(controller.text);
-                if (err != null) {
-                  setD(() => errorText = err);
-                } else {
-                  if (ctx.mounted) Navigator.pop(ctx);
-                  if (mounted) setState(() {});
-                }
-              },
-              child: const Text('儲存'),
-            ),
-          ],
-        ),
-      ),
-    );
+  void _addToRecent(ChatUser user) {
+    setState(() {
+      _recentChats.removeWhere((u) => u.userId == user.userId);
+      _recentChats.insert(0, user);
+    });
   }
 
-  // ── Search ──────────────────────────────────────────────────────────────────
-  Future<void> _search() async {
-    final query = _searchController.text.trim();
-    if (query.isEmpty) return;
-    setState(() { _searching = true; _searched = false; _searchResult = null; });
-    try {
-      final user = await _chatService.searchUser(query);
-      if (mounted) setState(() { _searchResult = user; _searched = true; });
-    } finally {
-      if (mounted) setState(() => _searching = false);
-    }
-  }
-
-  // ── Open chat (with lock gate) ───────────────────────────────────────────────
   Future<void> _openChat(ChatUser user) async {
     final lock = ChatSessionLock.instance;
 
@@ -130,6 +63,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     if (!mounted) return;
+    _addToRecent(user);
     await Navigator.push(
       context,
       MaterialPageRoute(
@@ -145,38 +79,110 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _chatService.dispose();
-    _searchController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return Scaffold(
-        appBar: AppBar(title: const Text('P Chats')),
-        body: const Center(child: CircularProgressIndicator()),
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
       );
     }
 
-    final handle = _chatService.currentHandle;
-
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('P Chats'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: '登出',
-            onPressed: _signOut,
+      body: IndexedStack(
+        index: _tabIndex,
+        children: [
+          _SearchTab(chatService: _chatService, onOpenChat: _openChat),
+          _RecentTab(recentChats: _recentChats, onOpenChat: _openChat),
+          SettingsScreen(
+            chatService: _chatService,
+            authService: widget.authService,
+            onSignOut: _signOut,
           ),
         ],
       ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _tabIndex,
+        onTap: (i) => setState(() => _tabIndex = i),
+        selectedItemColor: Colors.orange,
+        unselectedItemColor: Colors.grey,
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.home_outlined),
+            activeIcon: Icon(Icons.home),
+            label: '首頁',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.chat_bubble_outline),
+            activeIcon: Icon(Icons.chat_bubble),
+            label: '訊息',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.settings_outlined),
+            activeIcon: Icon(Icons.settings),
+            label: '設定',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── 首頁 tab: search ──────────────────────────────────────────────────────────
+
+class _SearchTab extends StatefulWidget {
+  final ChatService chatService;
+  final Future<void> Function(ChatUser) onOpenChat;
+
+  const _SearchTab({required this.chatService, required this.onOpenChat});
+
+  @override
+  State<_SearchTab> createState() => _SearchTabState();
+}
+
+class _SearchTabState extends State<_SearchTab> {
+  final _searchController = TextEditingController();
+  bool _searching = false;
+  ChatUser? _searchResult;
+  bool _searched = false;
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _search() async {
+    final query = _searchController.text.trim();
+    if (query.isEmpty) return;
+    setState(() {
+      _searching = true;
+      _searched = false;
+      _searchResult = null;
+    });
+    try {
+      final user = await widget.chatService.searchUser(query);
+      if (mounted) setState(() { _searchResult = user; _searched = true; });
+    } finally {
+      if (mounted) setState(() => _searching = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final handle = widget.chatService.currentHandle;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('P Chats')),
       body: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
         children: [
-          // ── E2E badge ──────────────────────────────────────────────────────
+          // E2E badge
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            padding:
+                const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
             decoration: BoxDecoration(
               color: Colors.orange.shade50,
               borderRadius: BorderRadius.circular(12),
@@ -188,7 +194,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 Expanded(
                   child: Text(
                     '端到端加密 · 訊息閱後即從伺服器刪除',
-                    style: TextStyle(fontSize: 12, color: Colors.orange.shade800),
+                    style: TextStyle(
+                        fontSize: 12, color: Colors.orange.shade800),
                   ),
                 ),
               ],
@@ -196,7 +203,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           const SizedBox(height: 24),
 
-          // ── My handle card ─────────────────────────────────────────────────
+          // My handle card
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
@@ -218,28 +225,23 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: Text(
                         handle != null ? '@$handle' : '尚未設定',
                         style: const TextStyle(
-                            fontSize: 22, fontWeight: FontWeight.bold),
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold),
                       ),
-                    ),
-                    TextButton.icon(
-                      icon: const Icon(Icons.edit_outlined, size: 16),
-                      label: const Text('編輯'),
-                      style: TextButton.styleFrom(
-                          foregroundColor: Colors.orange),
-                      onPressed: _showEditHandleDialog,
                     ),
                   ],
                 ),
                 Text(
-                  '其他使用者需要輸入此 ID 才能找到你',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade400),
+                  '其他使用者需輸入此 ID 才能找到你（可至設定修改）',
+                  style: TextStyle(
+                      fontSize: 12, color: Colors.grey.shade400),
                 ),
               ],
             ),
           ),
           const SizedBox(height: 28),
 
-          // ── Search ─────────────────────────────────────────────────────────
+          // Search
           Text('搜尋用戶',
               style: TextStyle(
                   fontSize: 13,
@@ -273,7 +275,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 child: _searching
                     ? const SizedBox(
-                        width: 18, height: 18,
+                        width: 18,
+                        height: 18,
                         child: CircularProgressIndicator(
                             strokeWidth: 2, color: Colors.white),
                       )
@@ -283,7 +286,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           const SizedBox(height: 16),
 
-          // ── Search result ──────────────────────────────────────────────────
+          // Search result
           if (_searched) ...[
             if (_searchResult == null)
               Container(
@@ -299,54 +302,121 @@ class _HomeScreenState extends State<HomeScreen> {
                         color: Colors.grey.shade400),
                     const SizedBox(width: 12),
                     Text('找不到此用戶 ID',
-                        style: TextStyle(color: Colors.grey.shade500)),
+                        style:
+                            TextStyle(color: Colors.grey.shade500)),
                   ],
                 ),
               )
             else
-              Card(
-                elevation: 0,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  side: BorderSide(color: Colors.orange.shade100),
+              _UserCard(
+                user: _searchResult!,
+                trailing: FilledButton(
+                  onPressed: () => widget.onOpenChat(_searchResult!),
+                  style: FilledButton.styleFrom(
+                      backgroundColor: Colors.orange),
+                  child: const Text('開始對話'),
                 ),
-                child: ListTile(
-                  contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 6),
-                  leading: CircleAvatar(
-                    backgroundColor: Colors.orange.shade100,
-                    backgroundImage: _searchResult!.photoURL.isNotEmpty
-                        ? NetworkImage(_searchResult!.photoURL)
-                        : null,
-                    child: _searchResult!.photoURL.isEmpty
-                        ? Text(
-                            _searchResult!.displayName.isNotEmpty
-                                ? _searchResult!.displayName[0].toUpperCase()
-                                : '?',
-                            style: TextStyle(
-                                color: Colors.orange.shade700,
-                                fontWeight: FontWeight.bold),
-                          )
-                        : null,
-                  ),
-                  title: Text(
-                    _searchResult!.displayName,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: Text('@${_searchResult!.userHandle}',
-                      style: TextStyle(
-                          color: Colors.orange.shade700, fontSize: 13)),
-                  trailing: FilledButton(
-                    onPressed: () => _openChat(_searchResult!),
-                    style: FilledButton.styleFrom(
-                        backgroundColor: Colors.orange),
-                    child: const Text('開始對話'),
-                  ),
-                  onTap: () => _openChat(_searchResult!),
-                ),
+                onTap: () => widget.onOpenChat(_searchResult!),
               ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+// ── 訊息 tab: recent chats ────────────────────────────────────────────────────
+
+class _RecentTab extends StatelessWidget {
+  final List<ChatUser> recentChats;
+  final Future<void> Function(ChatUser) onOpenChat;
+
+  const _RecentTab(
+      {required this.recentChats, required this.onOpenChat});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('訊息')),
+      body: recentChats.isEmpty
+          ? Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.chat_bubble_outline,
+                      size: 64, color: Colors.grey.shade300),
+                  const SizedBox(height: 16),
+                  const Text('尚無最近對話',
+                      style:
+                          TextStyle(fontSize: 16, color: Colors.grey)),
+                  const SizedBox(height: 8),
+                  Text('從首頁搜尋用戶來開始對話',
+                      style: TextStyle(
+                          fontSize: 13, color: Colors.grey.shade400)),
+                ],
+              ),
+            )
+          : ListView.separated(
+              padding: const EdgeInsets.all(8),
+              itemCount: recentChats.length,
+              separatorBuilder: (_, _) =>
+                  const Divider(height: 1, indent: 72),
+              itemBuilder: (context, i) {
+                final u = recentChats[i];
+                return _UserCard(
+                  user: u,
+                  onTap: () => onOpenChat(u),
+                );
+              },
+            ),
+    );
+  }
+}
+
+// ── Shared user card widget ───────────────────────────────────────────────────
+
+class _UserCard extends StatelessWidget {
+  final ChatUser user;
+  final Widget? trailing;
+  final VoidCallback? onTap;
+
+  const _UserCard({required this.user, this.trailing, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: Colors.orange.shade100),
+      ),
+      child: ListTile(
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        leading: CircleAvatar(
+          backgroundColor: Colors.orange.shade100,
+          backgroundImage: user.photoURL.isNotEmpty
+              ? NetworkImage(user.photoURL)
+              : null,
+          child: user.photoURL.isEmpty
+              ? Text(
+                  user.displayName.isNotEmpty
+                      ? user.displayName[0].toUpperCase()
+                      : '?',
+                  style: TextStyle(
+                      color: Colors.orange.shade700,
+                      fontWeight: FontWeight.bold),
+                )
+              : null,
+        ),
+        title: Text(user.displayName,
+            style: const TextStyle(fontWeight: FontWeight.bold)),
+        subtitle: Text('@${user.userHandle}',
+            style:
+                TextStyle(color: Colors.orange.shade700, fontSize: 13)),
+        trailing: trailing ??
+            const Icon(Icons.chat_bubble_outline, color: Colors.grey),
+        onTap: onTap,
       ),
     );
   }

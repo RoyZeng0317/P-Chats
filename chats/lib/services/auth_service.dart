@@ -49,4 +49,20 @@ class AuthService {
     await _googleSignIn.signOut();
     await _auth.signOut();
   }
+
+  // Returns null on success, or an error message string.
+  Future<String?> deleteAccount() async {
+    try {
+      await _googleSignIn.signOut();
+      await _auth.currentUser?.delete();
+      return null;
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'requires-recent-login') {
+        return '請先重新登入後再刪除帳號';
+      }
+      return e.message ?? '刪除帳號失敗';
+    } catch (e) {
+      return e.toString();
+    }
+  }
 }

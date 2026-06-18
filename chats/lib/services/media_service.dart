@@ -30,8 +30,21 @@ class MediaService {
     return File(picked.path);
   }
 
+  Future<File?> captureImage() async {
+    final picked = await _picker.pickImage(
+        source: ImageSource.camera, imageQuality: 85);
+    if (picked == null) return null;
+    return File(picked.path);
+  }
+
   Future<File?> pickVideo() async {
     final picked = await _picker.pickVideo(source: ImageSource.gallery);
+    if (picked == null) return null;
+    return File(picked.path);
+  }
+
+  Future<File?> captureVideo() async {
+    final picked = await _picker.pickVideo(source: ImageSource.camera);
     if (picked == null) return null;
     return File(picked.path);
   }
@@ -59,23 +72,35 @@ class MediaService {
     return PickedFile(file: file, name: f.name);
   }
 
+  // Signed upload using API Key + Secret — no upload preset required.
   // resourceType: 'image' | 'video' | 'raw'
-  Future<MediaResult?> upload(
+  Future<(MediaResult?, String?)> upload(
       String uid, File file, String resourceType) async {
     try {
       final cloudName = dotenv.env['CLOUDINARY_CLOUD_NAME'] ?? '';
-      final uploadPreset = dotenv.env['CLOUDINARY_UPLOAD_PRESET'] ?? '';
+      final apiKey = dotenv.env['CLOUDINARY_API_KEY'] ?? '';
+      final apiSecret = dotenv.env['CLOUDINARY_API_SECRET'] ?? '';
 
-      if (cloudName.isEmpty || uploadPreset.isEmpty) {
-        debugPrint('[MediaService] 缺少 Cloudinary 憑證');
-        return null;
-      }
+      if (cloudName.isEmpty) return (null, '缺少 CLOUDINARY_CLOUD_NAME');
+      if (apiKey.isEmpty) return (null, '缺少 CLOUDINARY_API_KEY');
+      if (apiSecret.isEmpty) return (null, '缺少 CLOUDINARY_API_SECRET');
+
+      final timestamp = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final folder = 'pchats/$uid';
+
+      // Params must be sorted alphabetically before signing
+      final toSign = 'folder=$folder&timestamp=$timestamp';
+      final signature =
+          sha256.convert(utf8.encode(toSign + apiSecret)).toString();
 
       final uri = Uri.parse(
           'https://api.cloudinary.com/v1_1/$cloudName/$resourceType/upload');
 
       final request = http.MultipartRequest('POST', uri)
-        ..fields['upload_preset'] = uploadPreset
+        ..fields['api_key'] = apiKey
+        ..fields['timestamp'] = timestamp.toString()
+        ..fields['signature'] = signature
+        ..fields['folder'] = folder
         ..files.add(await http.MultipartFile.fromPath('file', file.path));
 
       final streamed =
@@ -85,17 +110,27 @@ class MediaService {
       debugPrint('[MediaService] status=${response.statusCode}');
       debugPrint('[MediaService] body=${response.body}');
 
-      if (response.statusCode != 200) return null;
+      if (response.statusCode != 200) {
+        String errMsg = 'HTTP ${response.statusCode}';
+        try {
+          final body = jsonDecode(response.body) as Map<String, dynamic>;
+          final msg = body['error']?['message'] as String?;
+          if (msg != null && msg.isNotEmpty) errMsg = msg;
+        } catch (_) {}
+        return (null, errMsg);
+      }
 
       final data = jsonDecode(response.body) as Map<String, dynamic>;
-      return MediaResult(
-        url: data['secure_url'] as String,
-        publicId: data['public_id'] as String,
+      return (
+        MediaResult(
+          url: data['secure_url'] as String,
+          publicId: data['public_id'] as String,
+        ),
+        null,
       );
-    } catch (e, st) {
-      debugPrint('[MediaService] upload error: $e');
-      debugPrint('[MediaService] stack: $st');
-      return null;
+    } catch (e) {
+      debugPrint('[MediaService] upload exception: $e');
+      return (null, e.toString());
     }
   }
 

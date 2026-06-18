@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import '../models/user_info.dart';
 import '../models/chat_message.dart';
+import 'database_service.dart';
 import 'encryption_service.dart';
 import 'media_service.dart';
 
@@ -35,6 +37,7 @@ class ChatService {
 
   String? get currentUserId => _currentUser?.uid;
   String? get currentHandle => _currentHandle;
+  String? get currentDisplayName => _currentUser?.displayName;
   Stream<ChatMessage> get messageStream => _messageController.stream;
   Stream<Map<String, dynamic>> get eventStream => _eventController.stream;
   Stream<Map<String, dynamic>> get burnAckStream => _eventController.stream;
@@ -61,6 +64,41 @@ class ChatService {
       'userHandle': _currentHandle,
       'lastSeen': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
+
+    // Cache own user data locally in SQLite
+    await DatabaseService.instance.upsertUser(
+      uid: user.uid,
+      handle: _currentHandle,
+      name: user.displayName ?? user.email ?? 'Unknown',
+      photoUrl: user.photoURL ?? '',
+      publicKey: _encryptionService.publicKeyBase64,
+    );
+  }
+
+  Future<String?> updateDisplayName(String newName) async {
+    final name = newName.trim();
+    if (name.isEmpty) return '顯示名稱不得為空';
+    if (name.length > 30) return '顯示名稱最多 30 個字元';
+
+    await _currentUser!.updateDisplayName(name);
+    await _firestore
+        .collection('users')
+        .doc(_currentUser!.uid)
+        .update({'displayName': name});
+    await DatabaseService.instance.upsertUser(
+      uid: _currentUser!.uid,
+      name: name,
+    );
+    return null;
+  }
+
+  Future<void> deleteUserData() async {
+    if (_currentUser == null) return;
+    await _firestore
+        .collection('users')
+        .doc(_currentUser!.uid)
+        .delete()
+        .catchError((_) {});
   }
 
   // Returns null on success, error message string on failure.
@@ -102,12 +140,23 @@ class ChatService {
     final d = snap.docs.first;
     if (d.id == _currentUser?.uid) return null; // can't chat with yourself
     final data = d.data();
-    _peerPublicKeys[d.id] = data['publicKey'] as String? ?? '';
+    final pk = data['publicKey'] as String? ?? '';
+    _peerPublicKeys[d.id] = pk;
+
+    // Cache peer data in local SQLite
+    await DatabaseService.instance.upsertUser(
+      uid: d.id,
+      handle: data['userHandle'] as String?,
+      name: data['displayName'] as String?,
+      photoUrl: data['photoURL'] as String?,
+      publicKey: pk,
+    );
+
     return ChatUser(
       userId: d.id,
       displayName: data['displayName'] as String? ?? d.id,
       photoURL: data['photoURL'] as String? ?? '',
-      publicKey: data['publicKey'] as String? ?? '',
+      publicKey: pk,
       userHandle: data['userHandle'] as String? ?? '',
     );
   }
@@ -152,6 +201,11 @@ class ChatService {
       final from = data['from'] as String;
       if (from == _currentUser!.uid) return;
 
+      // Always fetch fresh public key from Firestore — peer may have restarted.
+      // forceRefresh bypasses both in-memory and SQLite caches.
+      _peerPublicKeys.remove(from);
+      _encryptionService.clearSharedSecret(from);
+
       final burnTimer = data['burnTimer'] as String? ?? 'off';
       final cloudinaryPublicId = data['cloudinaryPublicId'] as String?;
       final rawMediaType = data['mediaType'] as String?;
@@ -174,14 +228,19 @@ class ChatService {
         return;
       }
 
-      final publicKey = await _resolvePublicKey(from);
-      if (publicKey.isEmpty) return;
+      final publicKey = await _resolvePublicKey(from, forceRefresh: true);
+      if (publicKey.isEmpty) {
+        debugPrint('[ChatService] publicKey empty for $from — skipping');
+        return;
+      }
 
       final sharedSecret =
           await _encryptionService.getSharedSecret(from, publicKey);
       final plainText =
           await _encryptionService.decryptFromMap(data, sharedSecret);
       final payload = jsonDecode(plainText) as Map<String, dynamic>;
+
+      debugPrint('[ChatService] recv from=$from mediaType=${payload['mediaType']} hasUrl=${payload['mediaUrl'] != null}');
 
       if (!_messageController.isClosed) {
         _messageController.add(ChatMessage(
@@ -220,7 +279,10 @@ class ChatService {
             mediaType: rawMediaType,
           ));
       }
-    } catch (_) {}
+    } catch (e, st) {
+      debugPrint('[ChatService] _processIncoming error: $e');
+      debugPrint('[ChatService] stack: $st');
+    }
   }
 
   void _burnCloudinaryAndDoc(
@@ -288,11 +350,35 @@ class ChatService {
     }
   }
 
-  Future<String> _resolvePublicKey(String uid) async {
-    if (_peerPublicKeys[uid]?.isNotEmpty == true) return _peerPublicKeys[uid]!;
+  // forceRefresh=true skips all caches and always fetches from Firestore.
+  // Used by _processIncoming so we always decrypt with the peer's latest key.
+  Future<String> _resolvePublicKey(String uid, {bool forceRefresh = false}) async {
+    if (!forceRefresh) {
+      // 1. In-memory cache
+      if (_peerPublicKeys[uid]?.isNotEmpty == true) return _peerPublicKeys[uid]!;
+
+      // 2. Local SQLite cache
+      final cached = await DatabaseService.instance.getUser(uid);
+      final cachedPk = cached?['public_key'] as String?;
+      if (cachedPk != null && cachedPk.isNotEmpty) {
+        _peerPublicKeys[uid] = cachedPk;
+        return cachedPk;
+      }
+    }
+
+    // 3. Firestore — always reached when forceRefresh=true
     final doc = await _firestore.collection('users').doc(uid).get();
     final pk = doc.data()?['publicKey'] as String? ?? '';
     _peerPublicKeys[uid] = pk;
+    if (pk.isNotEmpty) {
+      await DatabaseService.instance.upsertUser(
+        uid: uid,
+        publicKey: pk,
+        handle: doc.data()?['userHandle'] as String?,
+        name: doc.data()?['displayName'] as String?,
+        photoUrl: doc.data()?['photoURL'] as String?,
+      );
+    }
     return pk;
   }
 
@@ -409,7 +495,15 @@ class ChatService {
     _listeningPeerId = null;
   }
 
-  Future<void> burnMessage(String documentId, String peerId) async {}
+  Future<void> burnMessage(String documentId, String peerId) async {
+    await _firestore
+        .collection('chats')
+        .doc(_chatId(peerId))
+        .collection('messages')
+        .doc(documentId)
+        .delete()
+        .catchError((_) {});
+  }
 
   void dispose() {
     if (_disposed) return;

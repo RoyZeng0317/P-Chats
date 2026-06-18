@@ -1,15 +1,10 @@
-import 'dart:convert';
-import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import '../services/database_service.dart';
 
 // Keeps track of which peer rooms have been unlocked in this session.
 class ChatSessionLock {
   ChatSessionLock._();
   static final ChatSessionLock instance = ChatSessionLock._();
-
-  static const _storage = FlutterSecureStorage();
-  static const _hashKey = 'pchats_app_password_hash';
 
   final Set<String> _unlockedPeers = {};
   bool _appUnlocked = false;
@@ -25,23 +20,13 @@ class ChatSessionLock {
     _appUnlocked = false;
   }
 
-  Future<bool> hasPassword() async {
-    final h = await _storage.read(key: _hashKey);
-    return h != null && h.isNotEmpty;
-  }
+  Future<bool> hasPassword() => DatabaseService.instance.hasPassword();
 
-  String _hash(String password) =>
-      sha256.convert(utf8.encode(password)).toString();
+  Future<void> setPassword(String password) =>
+      DatabaseService.instance.setPassword(password);
 
-  Future<void> setPassword(String password) async {
-    await _storage.write(key: _hashKey, value: _hash(password));
-  }
-
-  Future<bool> verify(String password) async {
-    final stored = await _storage.read(key: _hashKey);
-    if (stored == null) return false;
-    return stored == _hash(password);
-  }
+  Future<bool> verify(String password) =>
+      DatabaseService.instance.verifyPassword(password);
 
   void markAppUnlocked(String peerId) {
     _appUnlocked = true;
